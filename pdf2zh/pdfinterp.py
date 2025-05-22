@@ -60,6 +60,9 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         self.rsrcmgr = rsrcmgr
         self.device = device
         self.obj_patch = obj_patch
+        # state for inline image processing
+        self._inline_image_params: Dict[str, Any] | None = None
+        self._inline_image_data: bytes | None = None
 
     def dup(self) -> "PDFPageInterpreterEx":
         return self.__class__(self.rsrcmgr, self.device, self.obj_patch)
@@ -251,6 +254,47 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             # unsupported xobject type.
             pass
 
+    # ------------------------------------------------------------
+    # Inline image processing
+    def do_BI(self, parser: PDFContentParser) -> None:
+        """Begin inline image: parse image dictionary."""
+        params: Dict[str, Any] = {}
+        while True:
+            (_, obj) = parser.nextobject()
+            if isinstance(obj, PSKeyword):
+                name = keyword_name(obj)
+                if name == "ID":
+                    break
+                key = name
+            else:
+                key = obj
+            (_, value) = parser.nextobject()
+            params[str(key)] = value
+        self._inline_image_params = params
+
+    def do_ID(self, parser: PDFContentParser) -> None:
+        """Read inline image data."""
+        (_, data) = parser.nextobject()
+        if not isinstance(data, (bytes, bytearray)):
+            # some parsers may return str
+            data = str(data).encode("latin-1")
+        self._inline_image_data = bytes(data)
+
+    def do_EI(self) -> None:
+        """End inline image and render it."""
+        if self._inline_image_params is None or self._inline_image_data is None:
+            return
+        stream = dict(self._inline_image_params)
+        stream["_data_"] = self._inline_image_data
+        self.device.begin_figure("inline", (0, 0, 1, 1), MATRIX_IDENTITY)
+        if hasattr(self.device, "render_inline_image"):
+            self.device.render_inline_image("inline", stream)
+        else:
+            self.device.render_image("inline", stream)
+        self.device.end_figure("inline")
+        self._inline_image_params = None
+        self._inline_image_data = None
+
     def process_page(self, page: PDFPage) -> None:
         # 重载设置 page 的 obj_patch
         # log.debug("Processing page: %r", page)
@@ -317,6 +361,14 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                     "'",
                     "_q",
                 )
+                if name in ["BI", "ID", "EI"]:
+                    if name == "BI":
+                        self.do_BI(parser)
+                    elif name == "ID":
+                        self.do_ID(parser)
+                    else:
+                        self.do_EI()
+                    continue
                 if hasattr(self, method):
                     func = getattr(self, method)
                     nargs = func.__code__.co_argcount - 1

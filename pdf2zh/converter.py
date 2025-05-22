@@ -113,6 +113,10 @@ class PDFConverterEx(PDFConverter):
         item.font = font  # hack 插入原字符字体
         return item.adv
 
+    def render_inline_image(self, name, stream) -> None:
+        """Handle inline image rendering."""
+        return self.render_image(name, stream)
+
 
 class Paragraph:
     def __init__(self, y, x, x0, x1, y0, y1, size, brk):
