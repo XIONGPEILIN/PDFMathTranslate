@@ -57,7 +57,10 @@ class PDFConverterEx(PDFConverter):
         (x0, y0) = apply_matrix_pt(ctm, (x0, y0))
         (x1, y1) = apply_matrix_pt(ctm, (x1, y1))
         mediabox = (0, 0, abs(x0 - x1), abs(y0 - y1))
-        self.cur_item = LTPage(page.pageno, mediabox)
+        # pdfminer.six 20221105 removed the `pageno` attribute in favor of
+        # `pageid`.
+        page_number = getattr(page, "pageno", getattr(page, "pageid", 0))
+        self.cur_item = LTPage(page_number, mediabox)
 
     def end_page(self, page):
         # 重载返回指令流
@@ -339,9 +342,13 @@ class TranslateConverter(PDFConverterEx):
             varf.append(vfix)
         log.debug("\n==========[VSTACK]==========\n")
         for id, v in enumerate(var):  # 计算公式宽度
-            l = max([vch.x1 for vch in v]) - v[0].x0
-            log.debug(f'< {l:.1f} {v[0].x0:.1f} {v[0].y0:.1f} {v[0].cid} {v[0].fontname} {len(varl[id])} > v{id} = {"".join([ch.get_text() for ch in v])}')
-            vlen.append(l)
+            width = max([vch.x1 for vch in v]) - v[0].x0
+            log.debug(
+                f'< {width:.1f} {v[0].x0:.1f} {v[0].y0:.1f} '
+                f'{v[0].cid} {v[0].fontname} {len(varl[id])} > v{id} = '
+                f"{''.join([ch.get_text() for ch in v])}"
+            )
+            vlen.append(width)
 
         ############################################################
         # B. 段落翻译
@@ -474,15 +481,15 @@ class TranslateConverter(PDFConverterEx):
                         if log.isEnabledFor(logging.DEBUG):
                             lstk.append(LTLine(0.1, (_x, _y), (x + vch.x0 - var[vid][0].x0, fix + y + vch.y0 - var[vid][0].y0)))
                             _x, _y = x + vch.x0 - var[vid][0].x0, fix + y + vch.y0 - var[vid][0].y0
-                    for l in varl[vid]:  # 排版公式线条
-                        if l.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
+                    for line_obj in varl[vid]:  # 排版公式线条
+                        if line_obj.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
                             ops_vals.append({
                                 "type": OpType.LINE,
-                                "x": l.pts[0][0] + x - var[vid][0].x0,
-                                "dy": l.pts[0][1] + fix - var[vid][0].y0,
-                                "linewidth": l.linewidth,
-                                "xlen": l.pts[1][0] - l.pts[0][0],
-                                "ylen": l.pts[1][1] - l.pts[0][1],
+                                "x": line_obj.pts[0][0] + x - var[vid][0].x0,
+                                "dy": line_obj.pts[0][1] + fix - var[vid][0].y0,
+                                "linewidth": line_obj.linewidth,
+                                "xlen": line_obj.pts[1][0] - line_obj.pts[0][0],
+                                "ylen": line_obj.pts[1][1] - line_obj.pts[0][1],
                                 "lidx": lidx
                             })
                 else:  # 插入文字缓冲区
@@ -523,9 +530,17 @@ class TranslateConverter(PDFConverterEx):
                 elif vals["type"] == OpType.LINE:
                     ops_list.append(gen_op_line(vals["x"], vals["dy"] + y - vals["lidx"] * size * line_height, vals["xlen"], vals["ylen"], vals["linewidth"]))
 
-        for l in lstk:  # 排版全局线条
-            if l.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
-                ops_list.append(gen_op_line(l.pts[0][0], l.pts[0][1], l.pts[1][0] - l.pts[0][0], l.pts[1][1] - l.pts[0][1], l.linewidth))
+        for line_item in lstk:  # 排版全局线条
+            if line_item.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
+                ops_list.append(
+                    gen_op_line(
+                        line_item.pts[0][0],
+                        line_item.pts[0][1],
+                        line_item.pts[1][0] - line_item.pts[0][0],
+                        line_item.pts[1][1] - line_item.pts[0][1],
+                        line_item.linewidth,
+                    )
+                )
 
         ops = f"BT {''.join(ops_list)}ET "
         return ops
