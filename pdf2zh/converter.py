@@ -179,6 +179,7 @@ class TranslateConverter(PDFConverterEx):
         varl: list[list[LTLine]] = []   # 公式线条组栈
         varf: list[float] = []          # 公式纵向偏移栈
         vlen: list[float] = []          # 公式宽度栈
+        figs: list[LTFigure] = []       # 嵌入图片栈
         # 全局
         lstk: list[LTLine] = []         # 全局线条栈
         xt: LTChar = None               # 上一个字符
@@ -313,7 +314,25 @@ class TranslateConverter(PDFConverterEx):
                 xt = child
                 xt_cls = cls
             elif isinstance(child, LTFigure):   # 图表
-                pass
+                # 创建段落并插入图片占位符
+                if not sstk:
+                    sstk.append("")
+                    pstk.append(
+                        Paragraph(
+                            child.y0,
+                            child.x0,
+                            child.x0,
+                            child.x1,
+                            child.y0,
+                            child.y1,
+                            0,
+                            False,
+                        )
+                    )
+                fig_id = len(figs)
+                sstk[-1] += f"<f{fig_id}>"
+                figs.append(child)
+                xt = child
             elif isinstance(child, LTLine):     # 线条
                 layout = self.layout[ltpage.pageid]
                 # ltpage.height 可能是 fig 里面的高度，这里统一用 layout.shape
@@ -345,7 +364,7 @@ class TranslateConverter(PDFConverterEx):
 
         @retry(wait=wait_fixed(1))
         def worker(s: str):  # 多线程翻译
-            if not s.strip() or re.match(r"^\{v\d+\}$", s):  # 空白和公式不翻译
+            if not s.strip() or re.match(r"^\{v\d+\}$", s) or re.match(r"^<f\d+>$", s):  # 空白、公式和图片不翻译
                 return s
             try:
                 new = self.translator.translate(s)
@@ -405,6 +424,10 @@ class TranslateConverter(PDFConverterEx):
             ops_vals: list[dict] = []
 
             while ptr < len(new):
+                fig_regex = re.match(r"<f(\d+)>", new[ptr:], re.IGNORECASE)
+                if fig_regex:
+                    ptr += len(fig_regex.group(0))
+                    continue
                 vy_regex = re.match(
                     r"\{\s*v([\d\s]+)\}", new[ptr:], re.IGNORECASE
                 )  # 匹配 {vn} 公式标记
