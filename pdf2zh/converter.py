@@ -331,7 +331,8 @@ class TranslateConverter(PDFConverterEx):
                         )
                     )
                 fig_id = len(figs)
-                sstk[-1] += f"<f{fig_id}>"
+                info = f"{child.x0:.2f},{child.y0:.2f},{child.x1:.2f},{child.y1:.2f}"
+                sstk[-1] += f"<f{fig_id}:{info}>"
                 figs.append(child)
                 xt = child
             elif isinstance(child, LTLine):     # 线条
@@ -425,7 +426,7 @@ class TranslateConverter(PDFConverterEx):
             ops_vals: list[dict] = []
 
             while ptr < len(new):
-                fig_regex = re.match(r"<f(\d+)>", new[ptr:], re.IGNORECASE)
+                fig_regex = re.match(r"<f(\d+):[^>]+>", new[ptr:], re.IGNORECASE)
                 if fig_regex:
                     ptr += len(fig_regex.group(0))
                     continue
