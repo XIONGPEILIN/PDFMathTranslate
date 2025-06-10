@@ -4,7 +4,7 @@ import re
 import unicodedata
 from enum import Enum
 from string import Template
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 from pdfminer.converter import PDFConverter
@@ -151,6 +151,7 @@ class TranslateConverter(PDFConverterEx):
         self.layout = layout
         self.noto_name = noto_name
         self.noto = noto
+        self.figures: Dict[int, list[LTFigure]] = {}
         self.translator: BaseTranslator = None
         # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
         param = service.split(":", 1)
@@ -547,6 +548,7 @@ class TranslateConverter(PDFConverterEx):
                 ops_list.append(gen_op_line(l.pts[0][0], l.pts[0][1], l.pts[1][0] - l.pts[0][0], l.pts[1][1] - l.pts[0][1], l.linewidth))
 
         ops = f"BT {''.join(ops_list)}ET "
+        self.figures[ltpage.pageid] = figs
         return ops
 
 
