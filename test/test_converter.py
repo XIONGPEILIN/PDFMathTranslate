@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch, MagicMock
-from pdfminer.layout import LTPage, LTChar, LTLine
+from pdfminer.layout import LTPage, LTChar, LTLine, LTFigure
 from pdfminer.pdfinterp import PDFResourceManager
 from pdf2zh.converter import PDFConverterEx, TranslateConverter
 
@@ -93,6 +93,21 @@ class TestTranslateConverter(unittest.TestCase):
         self.converter.layout = [None, mock_layout]
         self.converter.thread = 1
         result = self.converter.receive_layout(ltpage)
+        self.assertIsNotNone(result)
+
+    def test_receive_layout_with_figure_placeholder(self):
+        ltpage = LTPage(1, (0, 0, 100, 100))
+        ltpage.add(LTFigure("fig", (10, 10, 20, 20), (1, 0, 0, 1, 0, 0)))
+
+        mock_layout = MagicMock()
+        mock_layout.shape = (100, 100)
+        mock_layout.__getitem__.return_value = -1
+        self.converter.layout = [None, mock_layout]
+        self.converter.thread = 1
+
+        self.converter.translator.translate = MagicMock(return_value="<1>")
+        result = self.converter.receive_layout(ltpage)
+        self.converter.translator.translate.assert_not_called()
         self.assertIsNotNone(result)
 
     def test_invalid_translation_service(self):

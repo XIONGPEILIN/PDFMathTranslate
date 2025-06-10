@@ -128,6 +128,7 @@ class Paragraph:
 
 # fmt: off
 class TranslateConverter(PDFConverterEx):
+    figures: list[dict]
     def __init__(
         self,
         rsrcmgr,
@@ -145,6 +146,7 @@ class TranslateConverter(PDFConverterEx):
         ignore_cache: bool = False,
     ) -> None:
         super().__init__(rsrcmgr)
+        self.figures = []  # store figure metadata
         self.vfont = vfont
         self.vchar = vchar
         self.thread = thread
@@ -164,6 +166,16 @@ class TranslateConverter(PDFConverterEx):
                 self.translator = translator(lang_in, lang_out, service_model, envs=envs, prompt=prompt, ignore_cache=ignore_cache)
         if not self.translator:
             raise ValueError("Unsupported translation service")
+
+    @property
+    def figures(self) -> list[dict]:
+        if '_figures' not in self.__dict__:
+            self._figures = []
+        return self._figures
+
+    @figures.setter
+    def figures(self, value: list[dict]) -> None:
+        self._figures = value
 
     def receive_layout(self, ltpage: LTPage):
         # 段落
@@ -313,7 +325,37 @@ class TranslateConverter(PDFConverterEx):
                 xt = child
                 xt_cls = cls
             elif isinstance(child, LTFigure):   # 图表
-                pass
+                if vstk:              # flush formula before figure
+                    sstk[-1] += f"{{v{len(var)}}}"
+                    var.append(vstk)
+                    varl.append(vlstk)
+                    varf.append(vfix)
+                    vstk = []
+                    vlstk = []
+                    vfix = 0
+                fig_id = len(self.figures) + 1
+                self.figures.append(
+                    {
+                        "id": fig_id,
+                        "page": ltpage.pageid,
+                        "bbox": (child.x0, child.y0, child.x1, child.y1),
+                    }
+                )
+                sstk.append(f"<{fig_id}>")
+                pstk.append(
+                    Paragraph(
+                        child.y0,
+                        child.x0,
+                        child.x0,
+                        child.x1,
+                        child.y0,
+                        child.y1,
+                        0,
+                        False,
+                    )
+                )
+                xt = child
+                xt_cls = -1
             elif isinstance(child, LTLine):     # 线条
                 layout = self.layout[ltpage.pageid]
                 # ltpage.height 可能是 fig 里面的高度，这里统一用 layout.shape
@@ -345,7 +387,11 @@ class TranslateConverter(PDFConverterEx):
 
         @retry(wait=wait_fixed(1))
         def worker(s: str):  # 多线程翻译
-            if not s.strip() or re.match(r"^\{v\d+\}$", s):  # 空白和公式不翻译
+            if (
+                not s.strip()
+                or re.match(r"^<\d+>$", s.strip())
+                or re.match(r"^\{v\d+\}$", s)
+            ):  # 空白、图片和公式不翻译
                 return s
             try:
                 new = self.translator.translate(s)
