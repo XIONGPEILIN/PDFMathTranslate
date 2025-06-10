@@ -113,6 +113,7 @@ class TestTranslateConverter(unittest.TestCase):
             "tiro": Mock(to_unichr=lambda cid: chr(cid), char_width=lambda cid: 5),
             "noto": Mock(char_width=lambda cid: 5),
         }
+        self.converter.translator.translate = Mock(side_effect=lambda s: s)
 
         result = self.converter.receive_layout(ltpage)
         self.assertIsNotNone(result)
