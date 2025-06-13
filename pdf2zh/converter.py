@@ -151,7 +151,7 @@ class TranslateConverter(PDFConverterEx):
         self.layout = layout
         self.noto_name = noto_name
         self.noto = noto
-        self.figures: Dict[int, list[LTFigure]] = {}
+        self.figures: Dict[int, List[dict]] = {}
         self.translator: BaseTranslator = None
         # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
         param = service.split(":", 1)
@@ -180,7 +180,7 @@ class TranslateConverter(PDFConverterEx):
         varl: list[list[LTLine]] = []   # 公式线条组栈
         varf: list[float] = []          # 公式纵向偏移栈
         vlen: list[float] = []          # 公式宽度栈
-        figs: list[LTFigure] = []       # 嵌入图片栈
+        figs: list[dict] = []       # 嵌入图片栈, 记录位置
         # 全局
         lstk: list[LTLine] = []         # 全局线条栈
         xt: LTChar = None               # 上一个字符
@@ -332,8 +332,9 @@ class TranslateConverter(PDFConverterEx):
                     )
                 fig_id = len(figs)
                 info = f"{child.x0:.2f},{child.y0:.2f},{child.x1:.2f},{child.y1:.2f}"
+                pos = len(sstk[-1])
                 sstk[-1] += f"<f{fig_id}:{info}>"
-                figs.append(child)
+                figs.append({"figure": child, "pos": pos})
                 xt = child
             elif isinstance(child, LTLine):     # 线条
                 layout = self.layout[ltpage.pageid]
