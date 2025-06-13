@@ -143,6 +143,8 @@ class TranslateConverter(PDFConverterEx):
         envs: Dict = None,
         prompt: Template = None,
         ignore_cache: bool = False,
+        page_images: Dict = None,
+        embedded_images: Dict = None,
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -152,6 +154,10 @@ class TranslateConverter(PDFConverterEx):
         self.noto_name = noto_name
         self.noto = noto
         self.figures: Dict[int, List[dict]] = {}
+        self.page_images = page_images or {}
+        self.embedded_images = embedded_images or {}  # 存储嵌入在文本中的图像信息
+        self.ocr_processor = get_ocr_processor(lang_in)
+        self.image_processor = ImageProcessor(self.ocr_processor)
         self.translator: BaseTranslator = None
         # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
         param = service.split(":", 1)

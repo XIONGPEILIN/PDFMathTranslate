@@ -89,6 +89,8 @@ def translate_patch(
 ) -> None:
     rsrcmgr = PDFResourceManager()
     layout = {}
+    page_images = {}  # 存储页面图像数据，用于OCR
+    embedded_images = {}  # 存储嵌入图像信息
     device = TranslateConverter(
         rsrcmgr,
         vfont,
@@ -103,6 +105,8 @@ def translate_patch(
         envs,
         prompt,
         ignore_cache,
+        page_images,
+        embedded_images,
     )
 
     assert device is not None
@@ -129,6 +133,8 @@ def translate_patch(
             image = np.frombuffer(pix.samples, np.uint8).reshape(
                 pix.height, pix.width, 3
             )[:, :, ::-1]
+            # 存储页面图像数据用于OCR
+            page_images[page.pageno] = image
             page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
             # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
             box = np.ones((pix.height, pix.width))
@@ -153,6 +159,8 @@ def translate_patch(
                         np.clip(int(x1 + 1), 0, w - 1),
                         np.clip(int(h - y0 + 1), 0, h - 1),
                     )
+                    # 记录图像区域但不进行OCR处理
+                    logger.debug(f"页面 {pageno}: 发现{page_layout.names[int(d.cls)]}区域 bbox=({x0},{y0},{x1},{y1})，但未进行OCR文字提取")
                     box[y0:y1, x0:x1] = 0
             layout[page.pageno] = box
             # 新建一个 xref 存放新指令流
