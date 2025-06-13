@@ -426,8 +426,16 @@ class TranslateConverter(PDFConverterEx):
             ops_vals: list[dict] = []
 
             while ptr < len(new):
-                fig_regex = re.match(r"<f(\d+):[^>]+>", new[ptr:], re.IGNORECASE)
+                fig_regex = re.match(r"<f(\d+):([^>]+)>", new[ptr:], re.IGNORECASE)
                 if fig_regex:
+                    fid = int(fig_regex.group(1))
+                    bbox = tuple(map(float, fig_regex.group(2).split(',')))
+                    ops_vals.append({
+                        "type": OpType.IMAGE,
+                        "fig_id": fid,
+                        "bbox": bbox,
+                        "lidx": lidx,
+                    })
                     ptr += len(fig_regex.group(0))
                     continue
                 vy_regex = re.match(
@@ -543,6 +551,8 @@ class TranslateConverter(PDFConverterEx):
                     ops_list.append(gen_op_txt(vals["font"], vals["size"], vals["x"], vals["dy"] + y - vals["lidx"] * size * line_height, vals["rtxt"]))
                 elif vals["type"] == OpType.LINE:
                     ops_list.append(gen_op_line(vals["x"], vals["dy"] + y - vals["lidx"] * size * line_height, vals["xlen"], vals["ylen"], vals["linewidth"]))
+                elif vals["type"] == OpType.IMAGE:
+                    ops_list.append(f"<f{vals['fig_id']}:{','.join(f'{b:.2f}' for b in vals['bbox'])}>")
 
         for l in lstk:  # 排版全局线条
             if l.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
@@ -556,3 +566,4 @@ class TranslateConverter(PDFConverterEx):
 class OpType(Enum):
     TEXT = "text"
     LINE = "line"
+    IMAGE = "image"
