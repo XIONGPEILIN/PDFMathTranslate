@@ -4,7 +4,7 @@ import re
 import unicodedata
 from enum import Enum
 from string import Template
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 from pdfminer.converter import PDFConverter
@@ -143,6 +143,8 @@ class TranslateConverter(PDFConverterEx):
         envs: Dict = None,
         prompt: Template = None,
         ignore_cache: bool = False,
+        page_images: Dict = None,
+        embedded_images: Dict = None,
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -151,6 +153,11 @@ class TranslateConverter(PDFConverterEx):
         self.layout = layout
         self.noto_name = noto_name
         self.noto = noto
+        self.figures: Dict[int, List[dict]] = {}
+        self.page_images = page_images or {}
+        self.embedded_images = embedded_images or {}  # 存储嵌入在文本中的图像信息
+        self.ocr_processor = get_ocr_processor(lang_in)
+        self.image_processor = ImageProcessor(self.ocr_processor)
         self.translator: BaseTranslator = None
         # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
         param = service.split(":", 1)
@@ -179,6 +186,7 @@ class TranslateConverter(PDFConverterEx):
         varl: list[list[LTLine]] = []   # 公式线条组栈
         varf: list[float] = []          # 公式纵向偏移栈
         vlen: list[float] = []          # 公式宽度栈
+        figs: list[dict] = []       # 嵌入图片栈, 记录位置
         # 全局
         lstk: list[LTLine] = []         # 全局线条栈
         xt: LTChar = None               # 上一个字符
@@ -313,7 +321,27 @@ class TranslateConverter(PDFConverterEx):
                 xt = child
                 xt_cls = cls
             elif isinstance(child, LTFigure):   # 图表
-                pass
+                # 创建段落并插入图片占位符
+                if not sstk:
+                    sstk.append("")
+                    pstk.append(
+                        Paragraph(
+                            child.y0,
+                            child.x0,
+                            child.x0,
+                            child.x1,
+                            child.y0,
+                            child.y1,
+                            0,
+                            False,
+                        )
+                    )
+                fig_id = len(figs)
+                info = f"{child.x0:.2f},{child.y0:.2f},{child.x1:.2f},{child.y1:.2f}"
+                pos = len(sstk[-1])
+                sstk[-1] += f"<f{fig_id}:{info}>"
+                figs.append({"figure": child, "pos": pos})
+                xt = child
             elif isinstance(child, LTLine):     # 线条
                 layout = self.layout[ltpage.pageid]
                 # ltpage.height 可能是 fig 里面的高度，这里统一用 layout.shape
@@ -345,7 +373,7 @@ class TranslateConverter(PDFConverterEx):
 
         @retry(wait=wait_fixed(1))
         def worker(s: str):  # 多线程翻译
-            if not s.strip() or re.match(r"^\{v\d+\}$", s):  # 空白和公式不翻译
+            if not s.strip() or re.match(r"^\{v\d+\}$", s):  # 空白和公式不翻译，图片标记也交给翻译器
                 return s
             try:
                 new = self.translator.translate(s)
@@ -405,6 +433,18 @@ class TranslateConverter(PDFConverterEx):
             ops_vals: list[dict] = []
 
             while ptr < len(new):
+                fig_regex = re.match(r"<f(\d+):([^>]+)>", new[ptr:], re.IGNORECASE)
+                if fig_regex:
+                    fid = int(fig_regex.group(1))
+                    bbox = tuple(map(float, fig_regex.group(2).split(',')))
+                    ops_vals.append({
+                        "type": OpType.IMAGE,
+                        "fig_id": fid,
+                        "bbox": bbox,
+                        "lidx": lidx,
+                    })
+                    ptr += len(fig_regex.group(0))
+                    continue
                 vy_regex = re.match(
                     r"\{\s*v([\d\s]+)\}", new[ptr:], re.IGNORECASE
                 )  # 匹配 {vn} 公式标记
@@ -518,15 +558,19 @@ class TranslateConverter(PDFConverterEx):
                     ops_list.append(gen_op_txt(vals["font"], vals["size"], vals["x"], vals["dy"] + y - vals["lidx"] * size * line_height, vals["rtxt"]))
                 elif vals["type"] == OpType.LINE:
                     ops_list.append(gen_op_line(vals["x"], vals["dy"] + y - vals["lidx"] * size * line_height, vals["xlen"], vals["ylen"], vals["linewidth"]))
+                elif vals["type"] == OpType.IMAGE:
+                    ops_list.append(f"<f{vals['fig_id']}:{','.join(f'{b:.2f}' for b in vals['bbox'])}>")
 
         for l in lstk:  # 排版全局线条
             if l.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
                 ops_list.append(gen_op_line(l.pts[0][0], l.pts[0][1], l.pts[1][0] - l.pts[0][0], l.pts[1][1] - l.pts[0][1], l.linewidth))
 
         ops = f"BT {''.join(ops_list)}ET "
+        self.figures[ltpage.pageid] = figs
         return ops
 
 
 class OpType(Enum):
     TEXT = "text"
     LINE = "line"
+    IMAGE = "image"
