@@ -157,26 +157,25 @@ class ImageProcessor:
         
         return None
     
-    def process_embedded_image(self, page_image: np.ndarray, image_rect: Tuple, 
-                             text_blocks: List[Tuple], text_contents: List[str], 
+    def process_embedded_image(self, page_image: Optional[np.ndarray], image_rect: Tuple,
+                             text_blocks: List[Tuple], text_contents: List[str],
                              direction="horizontal") -> Dict:
         """
         处理嵌入在文本中的图像。
         
         Args:
-            page_image: 页面图像
+            page_image: 页面图像（可以为None，不使用OCR）
             image_rect: 图像矩形
             text_blocks: 文本块列表
             text_contents: 文本内容列表
             direction: 检测方向
             
         Returns:
-            Dict: 处理结果，包含是否嵌入、前面的文字、OCR文字等
+            Dict: 处理结果，包含是否嵌入、前面的文字等
         """
         result = {
             "is_embedded": False,
             "preceding_text": None,
-            "ocr_text": None,
             "image_placeholder": None
         }
         
@@ -193,27 +192,8 @@ class ImageProcessor:
             
             if result["preceding_text"]:
                 log.debug(f"图像前面的文字: {result['preceding_text'][:50]}...")
-                
-                # 使用OCR提取图像中的文字
-                x0, y0, x1, y1 = image_rect
-                h, w = page_image.shape[:2]
-                
-                # 转换坐标系（PDF坐标系原点在左下角，图像坐标系原点在左上角）
-                img_y0 = int(h - y1)
-                img_y1 = int(h - y0)
-                img_x0 = int(x0)
-                img_x1 = int(x1)
-                
-                result["ocr_text"] = self.ocr_processor.extract_text_from_page_region(
-                    page_image, (img_x0, img_y0, img_x1, img_y1)
-                )
-                
-                if result["ocr_text"]:
-                    log.debug(f"OCR提取的文字: {result['ocr_text'][:50]}...")
-                    # 创建图像占位符，格式为 {img:序号}
-                    result["image_placeholder"] = f"{{img:{hash(str(image_rect)) % 10000}}}"
-                else:
-                    log.debug("OCR未能从图像中提取到文字")
+                # 创建图像占位符，格式为 {img:序号}
+                result["image_placeholder"] = f"{{img:{hash(str(image_rect)) % 10000}}}"
             else:
                 log.debug("图像前面没有找到相关文字")
         else:
