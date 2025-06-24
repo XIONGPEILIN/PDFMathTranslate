@@ -11,10 +11,19 @@ import sys
 from string import Template
 from typing import List, Optional
 
-from pdf2zh import __version__, log
+
 from pdf2zh.high_level import translate, download_remote_fonts
 from pdf2zh.doclayout import OnnxModel, ModelInstance
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    from pdf2zh import __version__, log
+except ImportError:
+    # 如果直接运行此文件时发生循环导入，则直接定义这些变量
+    import logging
+    __version__ = "1.9.10"
+    log = logging.getLogger(__name__)
 
 from pdf2zh.config import ConfigManager
 from babeldoc.translation_config import TranslationConfig as YadtConfig
