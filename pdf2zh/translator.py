@@ -140,6 +140,7 @@ class BaseTranslator:
                     "\n\n"
                     f"Translate the following markdown source text to {self.lang_out}. "
                     "Keep the formula notation {v*} unchanged. "
+                    "Keep the image placeholders [IMG0], [IMG1], etc. unchanged. "
                     "Output translation directly without any additional text."
                     "\n\n"
                     f"Source Text: {text}"

@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch, MagicMock
-from pdfminer.layout import LTPage, LTChar, LTLine
+from pdfminer.layout import LTPage, LTChar, LTLine, LTFigure
 from pdfminer.pdfinterp import PDFResourceManager
 from pdf2zh.converter import PDFConverterEx, TranslateConverter
 
@@ -22,6 +22,7 @@ class TestPDFConverterEx(unittest.TestCase):
     def test_render_char(self):
         mock_matrix = (1, 2, 3, 4, 5, 6)
         mock_font = Mock()
+        mock_font.fontname = "mock_font"
         mock_font.to_unichr.return_value = "A"
         mock_font.char_width.return_value = 10
         mock_font.char_disp.return_value = (0, 0)
@@ -62,7 +63,7 @@ class TestTranslateConverter(unittest.TestCase):
     def test_receive_layout(self, mock_receive_layout):
         mock_page = LTPage(1, (0, 0, 100, 200))
         mock_font = Mock()
-        mock_font.fontname.return_value = "mock_font"
+        mock_font.fontname = "mock_font"
         mock_page.add(
             LTChar(
                 matrix=(1, 2, 3, 4, 5, 6),
@@ -83,7 +84,7 @@ class TestTranslateConverter(unittest.TestCase):
     def test_receive_layout_with_complex_formula(self):
         ltpage = LTPage(1, (0, 0, 500, 500))
         ltchar = Mock()
-        ltchar.fontname.return_value = "mock_font"
+        ltchar.fontname = "mock_font"
         ltline = LTLine(0.1, (0, 0), (10, 20))
         ltpage.add(ltchar)
         ltpage.add(ltline)
@@ -92,6 +93,28 @@ class TestTranslateConverter(unittest.TestCase):
         mock_layout.__getitem__.return_value = -1
         self.converter.layout = [None, mock_layout]
         self.converter.thread = 1
+        result = self.converter.receive_layout(ltpage)
+        self.assertIsNotNone(result)
+
+    def test_receive_layout_with_image_marker(self):
+        ltpage = LTPage(1, (0, 0, 100, 100))
+        mock_layout = MagicMock()
+        mock_layout.shape = (100, 100)
+        mock_layout.__getitem__.return_value = 1
+        self.converter.layout = {1: mock_layout}
+        self.converter.thread = 1
+        fig = LTFigure("fig", (15, 0, 25, 10), (1, 0, 0, 1, 0, 0))
+        ltpage.add(fig)
+        self.converter.noto = Mock()
+        self.converter.noto.char_lengths.return_value = (10,)
+        self.converter.noto.has_glyph.return_value = 0
+        self.converter.noto_name = "noto"
+        self.converter.fontmap = {
+            "tiro": Mock(to_unichr=lambda cid: chr(cid), char_width=lambda cid: 5),
+            "noto": Mock(char_width=lambda cid: 5),
+        }
+        self.converter.translator.translate = Mock(side_effect=lambda s: s)
+
         result = self.converter.receive_layout(ltpage)
         self.assertIsNotNone(result)
 

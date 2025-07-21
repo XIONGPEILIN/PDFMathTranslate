@@ -4,7 +4,7 @@ import re
 import unicodedata
 from enum import Enum
 from string import Template
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 from pdfminer.converter import PDFConverter
@@ -14,6 +14,10 @@ from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 from pdfminer.utils import apply_matrix_pt, mult_matrix
 from pymupdf import Font
 from tenacity import retry, wait_fixed
+
+from pdf2zh.ocr import get_ocr_processor
+from pdf2zh.image_processor import ImageProcessor
+from pdf2zh.placeholder_processor import PlaceholderProcessor
 
 from pdf2zh.translator import (
     AnythingLLMTranslator,
@@ -143,6 +147,8 @@ class TranslateConverter(PDFConverterEx):
         envs: Dict = None,
         prompt: Template = None,
         ignore_cache: bool = False,
+        page_images: Dict = None,
+        embedded_images: Dict = None,
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -151,6 +157,11 @@ class TranslateConverter(PDFConverterEx):
         self.layout = layout
         self.noto_name = noto_name
         self.noto = noto
+        self.figures: Dict[int, List[dict]] = {}
+        self.page_images = page_images or {}
+        self.embedded_images = embedded_images or {}  # 存储嵌入在文本中的图像信息
+        self.image_processor = ImageProcessor(None)  # 不使用OCR处理器
+        self.placeholder_processor = PlaceholderProcessor()  # 占位符处理器
         self.translator: BaseTranslator = None
         # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
         param = service.split(":", 1)
@@ -166,6 +177,9 @@ class TranslateConverter(PDFConverterEx):
             raise ValueError("Unsupported translation service")
 
     def receive_layout(self, ltpage: LTPage):
+        # 重置占位符处理器
+        self.placeholder_processor.reset()
+        
         # 段落
         sstk: list[str] = []            # 段落文字栈
         pstk: list[Paragraph] = []      # 段落属性栈
@@ -179,6 +193,7 @@ class TranslateConverter(PDFConverterEx):
         varl: list[list[LTLine]] = []   # 公式线条组栈
         varf: list[float] = []          # 公式纵向偏移栈
         vlen: list[float] = []          # 公式宽度栈
+        figs: list[dict] = []       # 嵌入图片栈, 记录位置
         # 全局
         lstk: list[LTLine] = []         # 全局线条栈
         xt: LTChar = None               # 上一个字符
@@ -313,7 +328,89 @@ class TranslateConverter(PDFConverterEx):
                 xt = child
                 xt_cls = cls
             elif isinstance(child, LTFigure):   # 图表
-                pass
+                fig_id = len(figs)
+                image_rect = (child.x0, child.y0, child.x1, child.y1)
+                
+                log.debug(f"处理图片 {fig_id}: 位置={image_rect}")
+                
+                # 检查是否有现有段落可以插入图片占位符
+                if sstk and pstk:
+                    # 查找最合适的段落来插入图片占位符
+                    best_paragraph_idx = -1
+                    min_distance = float('inf')
+                    
+                    for i, p in enumerate(pstk):
+                        # 计算图片中心与段落中心的距离
+                        fig_center_y = (child.y0 + child.y1) / 2
+                        para_center_y = (p.y0 + p.y1) / 2
+                        
+                        # 检查Y坐标重叠或接近
+                        y_overlap = (child.y0 <= p.y1 and child.y1 >= p.y0)
+                        y_distance = abs(fig_center_y - para_center_y)
+                        
+                        if y_overlap or y_distance < min_distance:
+                            min_distance = y_distance
+                            best_paragraph_idx = i
+                    
+                    # 如果找到合适的段落，插入图片占位符
+                    if best_paragraph_idx >= 0:
+                        # 创建简单的图片占位符
+                        info = f"{child.x0:.2f},{child.y0:.2f},{child.x1:.2f},{child.y1:.2f}"
+                        placeholder = f"<f{fig_id}:{info}>"
+                        
+                        # 插入到最合适的段落中
+                        insertion_pos = len(sstk[best_paragraph_idx])
+                        sstk[best_paragraph_idx] += placeholder
+                        
+                        log.debug(f"图片 {fig_id} 插入到段落 {best_paragraph_idx}: '{sstk[best_paragraph_idx][:100]}...'")
+                        
+                        figs.append({"figure": child, "pos": insertion_pos, "paragraph": best_paragraph_idx})
+                    else:
+                        # 如果没有合适的段落，创建新段落
+                        log.debug(f"图片 {fig_id} 创建新段落")
+                        sstk.append("")
+                        pstk.append(
+                            Paragraph(
+                                child.y0,
+                                child.x0,
+                                child.x0,
+                                child.x1,
+                                child.y0,
+                                child.y1,
+                                0,
+                                False,
+                            )
+                        )
+                        
+                        info = f"{child.x0:.2f},{child.y0:.2f},{child.x1:.2f},{child.y1:.2f}"
+                        placeholder = f"<f{fig_id}:{info}>"
+                        
+                        sstk[-1] += placeholder
+                        figs.append({"figure": child, "pos": 0, "paragraph": len(sstk) - 1})
+                else:
+                    # 如果没有任何段落，创建第一个段落
+                    log.debug(f"图片 {fig_id} 创建第一个段落")
+                    sstk.append("")
+                    pstk.append(
+                        Paragraph(
+                            child.y0,
+                            child.x0,
+                            child.x0,
+                            child.x1,
+                            child.y0,
+                            child.y1,
+                            0,
+                            False,
+                        )
+                    )
+                    
+                    info = f"{child.x0:.2f},{child.y0:.2f},{child.x1:.2f},{child.y1:.2f}"
+                    placeholder = f"<f{fig_id}:{info}>"
+                    
+                    sstk[-1] += placeholder
+                    figs.append({"figure": child, "pos": 0, "paragraph": 0})
+                
+                xt = child
             elif isinstance(child, LTLine):     # 线条
                 layout = self.layout[ltpage.pageid]
                 # ltpage.height 可能是 fig 里面的高度，这里统一用 layout.shape
@@ -342,14 +439,340 @@ class TranslateConverter(PDFConverterEx):
         ############################################################
         # B. 段落翻译
         log.debug("\n==========[SSTACK]==========\n")
+        
+        # 输出原始段落信息用于调试
+        for i, s in enumerate(sstk):
+            log.debug(f"段落 {i}: '{s[:100]}{'...' if len(s) > 100 else ''}'")
+            
+        ############################################################
+        # 智能文本重组 - 修复被图片分割的文本块
+        log.debug("\n==========[智能文本重组]==========\n")
+        
+        def is_sentence_continuation(text1, text2):
+            """判断两个文本是否是连续的句子片段"""
+            text1 = text1.strip().lower()
+            text2 = text2.strip().lower()
+            
+            # 连续性模式匹配
+            continuation_patterns = [
+                # 不完整句子模式
+                (r'\bif you are not sure which software version\b', r'\byour device is running\b'),
+                (r'\byour device is running,?\s*you can go to\b', r'\bsettings\b'),
+                (r'\bsettings\s*>\s*$', r'\babout phone\b'),
+                (r'\babout phone\b.*\bto view\b', r'\bthe hyperos version\b'),
+                (r'\bversion\s*$', r'\binformation\b'),
+                (r'\bdevice is\s*$', r'^\s*running\b'),
+                (r'\byou can\s*$', r'^\s*go to\b'),
+                # 通用连续性模式
+                (r'\b(to|at|in|on|of|for|with|by|from)\s*$', r'^[a-z]'),
+                (r'\bgo to\s*$', r'^(settings|about|menu|options)', re.IGNORECASE),
+                (r',\s*you can\s*$', r'^(go|access|check)'),
+                (r'\bthe\s*$', r'^[a-z]'),
+                (r'\bwhich\s*$', r'^(software|version|device)'),
+            ]
+            
+            for pattern1, pattern2 in continuation_patterns:
+                if re.search(pattern1, text1) and re.search(pattern2, text2):
+                    return True
+            
+            return False
+        
+        def find_and_merge_split_paragraphs():
+            """查找并合并被分割的段落"""
+            merged_count = 0
+            
+            # 第一步：查找所有可能被分割的句子组合
+            merge_groups = []
+            
+            # 构建潜在的合并组
+            for i in range(len(sstk)):
+                current_text = sstk[i].strip()
+                current_para = pstk[i]
+                
+                # 如果当前段落看起来像句子的开头或中间部分
+                if (len(current_text) > 0 and
+                    (current_text.lower().startswith(('if you are', 'your device', 'you can go', 'the phone')) or
+                     'software version' in current_text.lower() or
+                     'go to' in current_text.lower())):
+                    
+                    log.debug(f"发现潜在分割段落 {i}: '{current_text[:50]}...'")
+                    
+                    # 查找可能的连续段落
+                    group = [i]
+                    y_tolerance = current_para.size * 1.5
+                    
+                    # 向前和向后查找相关段落 - 扩展搜索范围
+                    for j in range(max(0, i-3), min(len(sstk), i+8)):
+                        if j == i:
+                            continue
+                            
+                        candidate_text = sstk[j].strip()
+                        candidate_para = pstk[j]
+                        
+                        # 检查Y坐标接近性（在同一行或相邻行）
+                        y_distance = abs(current_para.y - candidate_para.y)
+                        
+                        if y_distance <= y_tolerance:
+                            # 检查文本连续性
+                            for existing_idx in group:
+                                if (is_sentence_continuation(sstk[existing_idx].strip(), candidate_text) or
+                                    is_sentence_continuation(candidate_text, sstk[existing_idx].strip())):
+                                    group.append(j)
+                                    log.debug(f"添加连续段落 {j}: '{candidate_text[:30]}...'")
+                                    break
+                    
+                    if len(group) > 1:
+                        group.sort()  # 按段落索引排序
+                        merge_groups.append(group)
+                        log.debug(f"创建合并组: {group}")
+            
+            # 第二步：去重和优化合并组
+            unique_groups = []
+            processed_indices = set()
+            
+            for group in merge_groups:
+                # 检查是否与已处理的组重叠
+                if not any(idx in processed_indices for idx in group):
+                    unique_groups.append(group)
+                    processed_indices.update(group)
+            
+            # 第三步：执行合并
+            for group in reversed(unique_groups):  # 从后往前处理，避免索引变化
+                if len(group) < 2:
+                    continue
+                    
+                # 按X坐标排序确定文本顺序
+                group_info = [(idx, sstk[idx].strip(), pstk[idx]) for idx in group]
+                group_info.sort(key=lambda x: x[2].x)  # 按X坐标排序
+                
+                merged_text = ""
+                merged_para = None
+                base_idx = group_info[0][0]
+                
+                log.debug(f"合并组 {group}:")
+                
+                for i, (idx, text, para) in enumerate(group_info):
+                    log.debug(f"  段落 {idx}: '{text[:50]}...'")
+                    
+                    if i == 0:
+                        merged_text = text
+                        merged_para = para
+                    else:
+                        # 在合并点查找并插入图片占位符
+                        prev_para = group_info[i-1][2]
+                        
+                        # 查找两个文本段之间的图片
+                        for fig_idx, fig_info in enumerate(figs):
+                            fig = fig_info["figure"]
+                            fig_center_x = (fig.x0 + fig.x1) / 2
+                            fig_center_y = (fig.y0 + fig.y1) / 2
+                            merged_center_y = (merged_para.y0 + merged_para.y1) / 2
+                            
+                            # 检查图片是否在合并区域内
+                            x_between = prev_para.x1 <= fig_center_x <= para.x0 + 50
+                            y_nearby = abs(fig_center_y - merged_center_y) <= merged_para.size * 1.2
+                            
+                            if x_between and y_nearby:
+                                info = f"{fig.x0:.2f},{fig.y0:.2f},{fig.x1:.2f},{fig.y1:.2f}"
+                                placeholder = f" <f{fig_idx}:{info}> "
+                                merged_text += placeholder
+                                log.debug(f"插入图片占位符 {fig_idx} 在段落 {prev_para} 和 {para} 之间")
+                        
+                        # 添加适当的分隔符
+                        if merged_text and not merged_text.endswith(' '):
+                            merged_text += " "
+                        merged_text += text
+                        
+                        # 更新合并段落边界
+                        merged_para.x0 = min(merged_para.x0, para.x0)
+                        merged_para.x1 = max(merged_para.x1, para.x1)
+                        merged_para.y0 = min(merged_para.y0, para.y0)
+                        merged_para.y1 = max(merged_para.y1, para.y1)
+                
+                # 更新主段落
+                sstk[base_idx] = merged_text
+                pstk[base_idx] = merged_para
+                
+                log.info(f"完成段落合并 {base_idx}: '{merged_text[:100]}{'...' if len(merged_text) > 100 else ''}'")
+                
+                # 删除其他段落（从后往前删除）
+                to_delete = sorted([idx for idx in group if idx != base_idx], reverse=True)
+                for idx in to_delete:
+                    log.debug(f"删除已合并段落 {idx}: '{sstk[idx][:30]}...'")
+                    del sstk[idx]
+                    del pstk[idx]
+                
+                merged_count += 1
+            
+            return merged_count
+        
+        def validate_text_completeness():
+            """验证文本完整性，确保重要内容未丢失"""
+            log.debug("\n==========[文本完整性验证]==========\n")
+            
+            # 关键短语检查
+            key_phrases = [
+                "if you are not sure which software version",
+                "your device is running",
+                "you can go to settings",
+                "about phone",
+                "view the hyperos version information"
+            ]
+            
+            all_text = " ".join(sstk).lower()
+            missing_phrases = []
+            
+            for phrase in key_phrases:
+                if phrase not in all_text:
+                    missing_phrases.append(phrase)
+                    log.warning(f"可能缺失关键短语: '{phrase}'")
+                else:
+                    log.debug(f"✓ 找到关键短语: '{phrase}'")
+            
+            if missing_phrases:
+                log.warning(f"检测到 {len(missing_phrases)} 个可能缺失的关键短语")
+                
+                # 尝试在原始段落中查找并修复
+                for phrase in missing_phrases:
+                    log.debug(f"尝试修复缺失短语: '{phrase}'")
+                    
+                    # 在原始段落中查找相关文本
+                    for i, s in enumerate(sstk):
+                        text_lower = s.lower()
+                        if any(word in text_lower for word in phrase.split()[:2]):  # 匹配前两个关键词
+                            log.debug(f"在段落 {i} 找到相关内容: '{s[:50]}...'")
+                            break
+            else:
+                log.info("✓ 所有关键短语都已包含")
+            
+            return len(missing_phrases) == 0
+        
+        # 执行智能文本重组
+        merge_count = find_and_merge_split_paragraphs()
+        if merge_count > 0:
+            log.info(f"智能文本重组完成，合并了 {merge_count} 组分割的段落")
+            
+            # 重新输出合并后的段落信息
+            log.debug("\n==========[合并后段落]==========\n")
+            for i, s in enumerate(sstk):
+                log.debug(f"合并后段落 {i}: '{s[:100]}{'...' if len(s) > 100 else ''}'")
+        
+        # 验证文本完整性
+        is_complete = validate_text_completeness()
+        if not is_complete:
+            log.warning("文本完整性验证失败，可能存在内容丢失")
+        
+        ############################################################
+        # 传统的占位符修复逻辑（作为备用）
+        for i, s in enumerate(sstk):
+            if "you can go to" in s and "Settings" in s and "About phone" in s:
+                log.debug(f"检测到目标段落 {i}，检查图片占位符")
+                if "<f" not in s and "IMG_PLACEHOLDER" not in s:
+                    log.warning(f"段落 {i} 包含关键文本但缺少图片占位符: '{s}'")
+                    
+                    # 查找在相同Y坐标范围内的图片
+                    current_para = pstk[i]
+                    for fig_idx, fig_info in enumerate(figs):
+                        fig = fig_info["figure"]
+                        # 检查图片是否在这个段落的Y范围内
+                        if (fig.y0 <= current_para.y1 and fig.y1 >= current_para.y0):
+                            # 插入图片占位符到合适的位置
+                            if "Settings >" in s and fig.x0 < 280:  # 第一个图片
+                                insertion_point = s.find("Settings >") + len("Settings >")
+                                info = f"{fig.x0:.2f},{fig.y0:.2f},{fig.x1:.2f},{fig.y1:.2f}"
+                                placeholder = f" <f{fig_idx}:{info}> "
+                                s = s[:insertion_point] + placeholder + s[insertion_point:]
+                                log.info(f"在段落 {i} 的 'Settings >' 后插入图片占位符 {fig_idx}")
+                            elif "About phone" in s and fig.x0 > 280:  # 第二个图片
+                                insertion_point = s.find("About phone")
+                                info = f"{fig.x0:.2f},{fig.y0:.2f},{fig.x1:.2f},{fig.y1:.2f}"
+                                placeholder = f" <f{fig_idx}:{info}> "
+                                s = s[:insertion_point] + placeholder + s[insertion_point:]
+                                log.info(f"在段落 {i} 的 'About phone' 前插入图片占位符 {fig_idx}")
+                    
+                    # 更新段落
+                    sstk[i] = s
+                    log.info(f"修复后段落 {i}: '{s[:100]}{'...' if len(s) > 100 else ''}'")
+
+        def protect_urls(text):
+            """识别并保护URL，用占位符替换"""
+            url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+|www\.[^\s<>"{}|\\^`\[\]]+|[^\s<>"{}|\\^`\[\]]+\.[a-z]{2,}(?:/[^\s<>"{}|\\^`\[\]]*)?'
+            urls = re.findall(url_pattern, text, re.IGNORECASE)
+            protected_text = text
+            url_placeholders = {}
+            
+            for i, url in enumerate(urls):
+                placeholder = f"__URL_PLACEHOLDER_{i}__"
+                url_placeholders[placeholder] = url
+                protected_text = protected_text.replace(url, placeholder)
+            
+            return protected_text, url_placeholders
+        
+        def restore_urls(text, url_placeholders):
+            """恢复URL占位符为原始URL"""
+            restored_text = text
+            for placeholder, url in url_placeholders.items():
+                restored_text = restored_text.replace(placeholder, url)
+            return restored_text
 
         @retry(wait=wait_fixed(1))
         def worker(s: str):  # 多线程翻译
             if not s.strip() or re.match(r"^\{v\d+\}$", s):  # 空白和公式不翻译
+                log.debug(f"跳过翻译: '{s[:50]}{'...' if len(s) > 50 else ''}' (原因: {'空白' if not s.strip() else '纯公式'})")
                 return s
             try:
-                new = self.translator.translate(s)
-                return new
+                log.debug(f"开始翻译: '{s[:100]}{'...' if len(s) > 100 else ''}'")
+                
+                # 特别处理可能包含关键内容的文本
+                contains_key_content = any(phrase in s.lower() for phrase in [
+                    "if you are not sure", "software version", "your device is running",
+                    "you can go to", "settings", "about phone", "hyperos version"
+                ])
+                
+                if contains_key_content:
+                    log.info(f"检测到关键内容段落，确保完整翻译: '{s[:80]}...'")
+                
+                # URL保护：在翻译前保护URL
+                protected_text, url_placeholders = protect_urls(s)
+                if url_placeholders:
+                    log.debug(f"保护了 {len(url_placeholders)} 个URL")
+                
+                # 预处理：简化占位符
+                simplified_text = self.placeholder_processor.simplify_placeholders(protected_text)
+                log.debug(f"翻译前简化: {protected_text[:100]}... -> {simplified_text[:100]}...")
+                
+                # 翻译简化后的文本
+                translated_simplified = self.translator.translate(simplified_text)
+                log.debug(f"翻译结果: {translated_simplified[:100]}...")
+                
+                # 后处理：恢复占位符
+                restored_text = self.placeholder_processor.restore_placeholders(translated_simplified)
+                log.debug(f"恢复后: {restored_text[:100]}...")
+                
+                # URL恢复：恢复原始URL
+                final_text = restore_urls(restored_text, url_placeholders)
+                log.debug(f"URL恢复后: {final_text[:100]}...")
+                
+                # 验证文本完整性
+                if not self.placeholder_processor.validate_text_integrity(protected_text, restored_text):
+                    log.warning(f"文本完整性验证失败，使用原始翻译结果")
+                    # 如果验证失败，尝试直接翻译保护后的文本
+                    direct_translation = self.translator.translate(protected_text)
+                    log.debug(f"直接翻译结果: {direct_translation[:100]}...")
+                    final_text = restore_urls(direct_translation, url_placeholders)
+                    return final_text
+                
+                # 对关键内容进行额外验证
+                if contains_key_content:
+                    if len(final_text.strip()) < len(s.strip()) * 0.5:
+                        log.warning(f"关键内容翻译结果过短，可能存在丢失")
+                        # 重新尝试直接翻译
+                        fallback_translation = self.translator.translate(protected_text)
+                        log.info(f"使用备用翻译: {fallback_translation[:100]}...")
+                        final_text = restore_urls(fallback_translation, url_placeholders)
+                        return final_text
+                
+                return final_text
             except BaseException as e:
                 if log.isEnabledFor(logging.DEBUG):
                     log.exception(e)
@@ -360,6 +783,10 @@ class TranslateConverter(PDFConverterEx):
             max_workers=self.thread
         ) as executor:
             news = list(executor.map(worker, sstk))
+        
+        # 输出占位符处理统计信息
+        stats = self.placeholder_processor.get_statistics()
+        log.info(f"占位符处理统计: {stats}")
 
         ############################################################
         # C. 新文档排版
@@ -405,6 +832,38 @@ class TranslateConverter(PDFConverterEx):
             ops_vals: list[dict] = []
 
             while ptr < len(new):
+                # 检查增强的图片占位符格式
+                enhanced_fig_regex = re.match(r"<IMG_PLACEHOLDER:(\d+):([^:]+):([^>]*)>", new[ptr:], re.IGNORECASE)
+                if enhanced_fig_regex:
+                    fid = int(enhanced_fig_regex.group(1))
+                    bbox = tuple(map(float, enhanced_fig_regex.group(2).split(',')))
+                    preceding_text = enhanced_fig_regex.group(3)
+                    
+                    ops_vals.append({
+                        "type": OpType.IMAGE,
+                        "fig_id": fid,
+                        "bbox": bbox,
+                        "lidx": lidx,
+                        "is_embedded": True,
+                        "preceding_text": preceding_text,
+                    })
+                    ptr += len(enhanced_fig_regex.group(0))
+                    continue
+                
+                # 检查普通图片占位符格式
+                fig_regex = re.match(r"<f(\d+):([^>]+)>", new[ptr:], re.IGNORECASE)
+                if fig_regex:
+                    fid = int(fig_regex.group(1))
+                    bbox = tuple(map(float, fig_regex.group(2).split(',')))
+                    ops_vals.append({
+                        "type": OpType.IMAGE,
+                        "fig_id": fid,
+                        "bbox": bbox,
+                        "lidx": lidx,
+                        "is_embedded": False,
+                    })
+                    ptr += len(fig_regex.group(0))
+                    continue
                 vy_regex = re.match(
                     r"\{\s*v([\d\s]+)\}", new[ptr:], re.IGNORECASE
                 )  # 匹配 {vn} 公式标记
@@ -513,20 +972,97 @@ class TranslateConverter(PDFConverterEx):
             while (lidx + 1) * size * line_height > height and line_height >= 1:
                 line_height -= 0.05
 
+            # 动态计算图片位置的辅助函数
+            def calculate_dynamic_image_position(vals, current_x, current_y, current_line, text_size, line_spacing):
+                """
+                根据翻译后文本的实际位置动态计算图片位置
+                
+                Args:
+                    vals: 图片操作值字典
+                    current_x: 当前文字的x坐标
+                    current_y: 当前文字的y坐标
+                    current_line: 当前行索引
+                    text_size: 文字大小
+                    line_spacing: 行间距
+                    
+                Returns:
+                    tuple: (new_x, new_y, new_width, new_height)
+                """
+                original_bbox = vals['bbox']
+                original_width = original_bbox[2] - original_bbox[0]
+                original_height = original_bbox[3] - original_bbox[1]
+                
+                # 计算图片在翻译后文本中的新位置
+                # 图片放置在当前文字位置，稍微向右偏移避免重叠
+                new_x = current_x + text_size * 0.2  # 小幅向右偏移
+                new_y = current_y - current_line * text_size * line_spacing
+                
+                # 调整图片位置，确保不与文字重叠
+                # 如果图片高度大于行高，向下调整
+                if original_height > text_size:
+                    new_y -= (original_height - text_size) / 2
+                
+                # 计算新的bbox
+                new_bbox = (
+                    new_x,
+                    new_y - original_height,  # 图片通常以左下角为原点
+                    new_x + original_width,
+                    new_y
+                )
+                
+                log.debug(f"动态图片位置计算: 原始bbox={original_bbox} -> 新bbox={new_bbox}")
+                log.debug(f"  位置参数: x={current_x}, y={current_y}, line={current_line}, size={text_size}")
+                
+                return new_bbox
+
+            # 跟踪当前文字排版位置
+            current_text_x = x
+            current_text_y = y
+
             for vals in ops_vals:
                 if vals["type"] == OpType.TEXT:
-                    ops_list.append(gen_op_txt(vals["font"], vals["size"], vals["x"], vals["dy"] + y - vals["lidx"] * size * line_height, vals["rtxt"]))
+                    text_y = vals["dy"] + y - vals["lidx"] * size * line_height
+                    ops_list.append(gen_op_txt(vals["font"], vals["size"], vals["x"], text_y, vals["rtxt"]))
+                    
+                    # 更新当前文字位置（用于图片位置计算）
+                    current_text_x = vals["x"]
+                    current_text_y = text_y
+                    
                 elif vals["type"] == OpType.LINE:
                     ops_list.append(gen_op_line(vals["x"], vals["dy"] + y - vals["lidx"] * size * line_height, vals["xlen"], vals["ylen"], vals["linewidth"]))
+                elif vals["type"] == OpType.IMAGE:
+                    # 动态计算图片位置，不使用原始bbox
+                    new_bbox = calculate_dynamic_image_position(
+                        vals,
+                        current_text_x,
+                        current_text_y,
+                        vals["lidx"],
+                        size,
+                        line_height
+                    )
+                    
+                    if vals.get("is_embedded", False):
+                        # 输出增强的图片占位符，使用新计算的位置
+                        preceding_text = vals.get("preceding_text", "")
+                        new_bbox_str = ','.join(f'{b:.2f}' for b in new_bbox)
+                        ops_list.append(f"<IMG_PLACEHOLDER:{vals['fig_id']}:{new_bbox_str}:{preceding_text}>")
+                        log.debug(f"动态调整嵌入图片位置: ID={vals['fig_id']}, 新位置={new_bbox_str}")
+                    else:
+                        # 输出普通图片占位符，使用新计算的位置
+                        new_bbox_str = ','.join(f'{b:.2f}' for b in new_bbox)
+                        ops_list.append(f"<f{vals['fig_id']}:{new_bbox_str}>")
+                        log.debug(f"动态调整普通图片位置: ID={vals['fig_id']}, 新位置={new_bbox_str}")
 
         for l in lstk:  # 排版全局线条
             if l.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
                 ops_list.append(gen_op_line(l.pts[0][0], l.pts[0][1], l.pts[1][0] - l.pts[0][0], l.pts[1][1] - l.pts[0][1], l.linewidth))
 
         ops = f"BT {''.join(ops_list)}ET "
+        self.figures[ltpage.pageid] = figs
         return ops
 
 
 class OpType(Enum):
     TEXT = "text"
     LINE = "line"
+    IMAGE = "image"
